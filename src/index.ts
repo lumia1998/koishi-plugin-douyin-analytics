@@ -1,6 +1,6 @@
 import { Context, Schema, h } from 'koishi'
 
-export const name = 'douyin'
+export const name = 'douyin-analytics'
 
 export const usage = `
 ## 解析群聊中的抖音链接

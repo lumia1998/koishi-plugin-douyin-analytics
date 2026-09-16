@@ -25,7 +25,7 @@ npm install koishi-plugin-douyin-analytics
 
 在 Koishi 控制台中配置：
 
-插件在 Koishi 配置中的实例名仍使用 `douyin`，例如 `douyin:local`；npm 包名已经改为 `koishi-plugin-douyin-analytics`。
+插件在 Koishi 配置中的实例名使用 `douyin-analytics`，例如 `douyin-analytics:local`；npm 包名为 `koishi-plugin-douyin-analytics`。
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
