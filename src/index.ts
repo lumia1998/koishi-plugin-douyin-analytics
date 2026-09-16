@@ -8,8 +8,7 @@ export const usage = `
 发送包含抖音链接的消息即可触发解析。插件使用 dtk 的 "/api/v1/parse" 接口，
 支持异步任务轮询、视频和图集，并在下载媒体后发送。
 
-请在配置中填写 dtk API 地址和 API Key。API 的同步等待上限为 30 秒；如果任务
-在此时间内没有完成，插件会继续轮询，不会把 202 当成解析失败。
+需要部署后端 [Douyin TikTok Download API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)。
 `
 
 export interface Config {
@@ -24,7 +23,7 @@ export interface Config {
 }
 
 export const Config = Schema.object({
-  apiHost: Schema.string().default('http://10.1.2.30:60080').description('dtk API 地址'),
+  apiHost: Schema.string().default('').description('dtk API 地址，请先部署后端服务'),
   apiKey: Schema.string().role('secret').default('').description('dtk API Key，不要写入源码'),
   maxDuration: Schema.number().min(0).default(90).description('允许发送的视频最大长度（秒），超出后只发送封面'),
   forward: Schema.boolean().default(false).description('以合并消息发送解析内容（仅支持 OneBot 适配器）'),
@@ -184,6 +183,7 @@ export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger(name)
   const baseUrl = config.apiHost.replace(/\/+$/, '')
 
+  if (!baseUrl) logger.warn('未配置 dtk API 地址，抖音链接解析将无法使用')
   if (!config.apiKey) logger.warn('未配置 dtk API Key，抖音链接解析将无法通过认证')
 
   function apiUrl(path: string) {
@@ -242,6 +242,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   async function parseContent(input: string): Promise<ParsedData> {
+    if (!baseUrl) throw new Error('未配置 dtk API 地址')
     const wait = Math.max(0, Math.min(30, config.waitSeconds))
     const response = await ctx.http.post<DtkResponse<ParsedData | ParseTask>>(
       `${apiUrl('/api/v1/parse')}?wait=${wait}&lang=zh`,
@@ -259,7 +260,11 @@ export function apply(ctx: Context, config: Config) {
 
   async function downloadVideo(url: string) {
     const video = await ctx.http.get<ArrayBuffer>(url, {
-      headers: { Accept: 'video/mp4,video/*;q=0.9,*/*;q=0.1' },
+      headers: {
+        Accept: 'video/mp4,video/*;q=0.9,*/*;q=0.1',
+        Referer: 'https://www.douyin.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+      },
       responseType: 'arraybuffer',
       timeout: config.downloadTimeout * 1000,
     })

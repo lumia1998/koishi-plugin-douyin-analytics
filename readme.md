@@ -29,7 +29,7 @@ npm install koishi-plugin-douyin-analytics
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `apiHost` | `http://10.1.2.30:60080` | dtk API 地址。此地址是示例内网地址，请按实际部署修改。 |
+| `apiHost` | 空 | dtk API 地址。需要先部署 [Douyin TikTok Download API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)，再填写实际地址。 |
 | `apiKey` | 空 | 通过 `X-API-Key` 请求头发送的 dtk API Key。 |
 | `maxDuration` | `90` | 允许发送的视频最大时长，单位为秒；超过后只发送封面。设为 `0` 可禁止发送视频。 |
 | `forward` | `false` | OneBot 适配器下是否使用合并转发。 |
