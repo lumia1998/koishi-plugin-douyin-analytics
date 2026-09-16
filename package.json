@@ -1,6 +1,6 @@
 {
-  "name": "koishi-plugin-douyin",
-  "description": "koishi plugin for douyin",
+  "name": "koishi-plugin-douyin-analytics",
+  "description": "Koishi plugin for Douyin analytics and media parsing",
   "author": {
     "name": "TEDIORELEE",
     "email": "tediorelee@gmail.com",
@@ -8,18 +8,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tediorelee/koishi-plugin-douyin"
+    "url": "git+https://github.com/lumia1998/koishi-plugin-douyin-analytics.git"
   },
   "private": false,
   "version": "0.0.14",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
-    "lib",
-    "dist"
+    "lib"
   ],
   "license": "MIT",
-  "scripts": {},
   "keywords": [
     "chatbot",
     "koishi",
@@ -28,12 +26,9 @@
   ],
   "koishi": {
     "description": {
-      "en": "Koishi plugin for douyin",
+      "en": "Koishi plugin for Douyin analytics and media parsing",
       "zh": "识别群聊中的抖音分享链接"
     }
-  },
-  "devDependencies": {
-    "@koishijs/client": "^5.29.1"
   },
   "peerDependencies": {
     "koishi": "^4.17.8"
