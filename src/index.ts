@@ -1,4 +1,5 @@
 import { Context, Schema, h } from 'koishi'
+import { describeError, DouyinApi, isRecord } from './api'
 
 export const name = 'douyin-analytics'
 
@@ -25,286 +26,108 @@ export interface Config {
 export const Config = Schema.object({
   apiHost: Schema.string().default('').description('dtk API 地址，请先部署后端服务'),
   apiKey: Schema.string().role('secret').default('').description('dtk API Key，不要写入源码'),
-  maxDuration: Schema.number().min(0).default(90).description('允许发送的视频最大长度（秒），超出后只发送封面'),
+  maxDuration: Schema.number().min(0).default(90).description('视频时长上限（秒），超出、时长未知或设为 0 时仅发送预览'),
   forward: Schema.boolean().default(false).description('以合并消息发送解析内容（仅支持 OneBot 适配器）'),
   waitSeconds: Schema.number().min(0).max(30).default(20).description('首次请求等待时间（秒），dtk 最大为 30 秒'),
-  pollInterval: Schema.number().min(0.2).max(10).default(1).description('异步任务轮询间隔（秒）'),
+  pollInterval: Schema.number().min(0.2).max(10).default(1).description('异步任务轮询初始间隔（秒）'),
   pollTimeout: Schema.number().min(5).max(600).default(180).description('异步任务最多等待时间（秒）'),
-  downloadTimeout: Schema.number().min(10).max(600).default(180).description('视频媒体下载超时时间（秒）'),
+  downloadTimeout: Schema.number().min(10).max(600).default(180).description('视频下载及备用地址的总超时时间（秒）'),
 })
 
-type RecordValue = Record<string, any>
+const shareDomains = ['douyin.com', 'iesdouyin.com', 'amemv.com']
+const mediaUrlFields = ['url', 'src', 'download_url', 'uri', 'urls', 'url_list']
 
-interface DtkErrorBody {
-  code?: string
-  message?: string
-  retry_after?: number | null
-  retryable?: boolean
-  [key: string]: any
-}
-
-interface DtkResponse<T> {
-  success: boolean
-  data: T | null
-  error?: DtkErrorBody | null
-  meta?: RecordValue
-}
-
-interface ParseTask {
-  task_id: string
-  state?: string
-  status?: string
-  data?: ParsedData | null
-  error?: DtkErrorBody | null
-  [key: string]: any
-}
-
-interface ParsedData {
-  kind?: string
-  title?: string
-  description?: string
-  duration_ms?: number | string | null
-  media?: RecordValue | null
-  [key: string]: any
-}
-
-class DtkApiError extends Error {
-  constructor(
-    message: string,
-    readonly code?: string,
-    readonly requestId?: string,
-  ) {
-    super(message)
-    this.name = 'DtkApiError'
-  }
-}
-
-function isRecord(value: unknown): value is RecordValue {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function isHttpUrl(value: unknown): value is string {
-  if (typeof value !== 'string' || !value.trim()) return false
+function httpUrl(value: string) {
   try {
-    const url = new URL(value.trim())
-    return url.protocol === 'http:' || url.protocol === 'https:'
+    const url = new URL(value)
+    if (url.protocol === 'https:' || url.protocol === 'http:') return url
   } catch {
-    return false
+    // Malformed links are ignored.
   }
-}
-
-function cleanUrl(value: string) {
-  return value.replace(/[)\]}>，。！？；：,.!?]+$/u, '')
 }
 
 function extractDouyinUrl(content: string) {
-  const candidates = content.match(/https?:\/\/[^\s]+/gi) || []
+  const candidates = content.match(/https?:\/\/[^\s<>"']+/gi) || []
   for (const candidate of candidates) {
-    const url = cleanUrl(candidate)
-    if (!isHttpUrl(url)) continue
-    const hostname = new URL(url).hostname.toLowerCase()
-    if (hostname === 'douyin.com' || hostname.endsWith('.douyin.com')) return url
-  }
-}
-
-function firstUrl(value: unknown, depth = 0): string | undefined {
-  if (depth > 4) return
-  if (isHttpUrl(value)) return value.trim()
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const url = firstUrl(item, depth + 1)
-      if (url) return url
+    const value = candidate.replace(/&amp;/gi, '&').replace(/[)\]}>，。！？；：,.!?]+$/u, '')
+    const url = httpUrl(value)
+    if (url && shareDomains.some(domain => url.hostname === domain || url.hostname.endsWith(`.${domain}`))) {
+      return value
     }
-    return
-  }
-  if (!isRecord(value)) return
-  for (const key of ['url', 'src', 'download_url', 'uri']) {
-    const url = firstUrl(value[key], depth + 1)
-    if (url) return url
-  }
-  for (const key of ['urls', 'url_list']) {
-    const url = firstUrl(value[key], depth + 1)
-    if (url) return url
   }
 }
 
-function collectUrls(value: unknown, result: string[] = [], depth = 0) {
-  if (depth > 4 || result.length >= 30) return result
-  if (isHttpUrl(value)) {
+function collectUrls(value: unknown, limit = 30, result = new Set<string>(), depth = 0) {
+  if (depth > 4 || result.size >= limit) return result
+  if (typeof value === 'string') {
     const url = value.trim()
-    if (!result.includes(url)) result.push(url)
-    return result
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) collectUrls(item, result, depth + 1)
-    return result
-  }
-  if (!isRecord(value)) return result
-  for (const key of ['url', 'src', 'download_url', 'uri', 'urls', 'url_list']) {
-    collectUrls(value[key], result, depth + 1)
+    if (httpUrl(url)) result.add(url)
+  } else if (Array.isArray(value)) {
+    for (const item of value) {
+      collectUrls(item, limit, result, depth + 1)
+      if (result.size >= limit) break
+    }
+  } else if (isRecord(value)) {
+    for (const key of mediaUrlFields) {
+      collectUrls(value[key], limit, result, depth + 1)
+      if (result.size >= limit) break
+    }
   }
   return result
 }
 
-function formatError(error: unknown) {
-  if (error instanceof Error) return error.stack || error.message
-  if (typeof error === 'string') return error
-  try {
-    return JSON.stringify(error)
-  } catch {
-    return String(error)
-  }
-}
-
-function responseError<T>(stage: string, response: DtkResponse<T>) {
-  const body = isRecord(response.error) ? response.error : {}
-  const code = typeof body.code === 'string' ? body.code : undefined
-  const message = typeof body.message === 'string' ? body.message : '接口返回失败'
-  const requestId = isRecord(response.meta) && typeof response.meta.request_id === 'string'
-    ? response.meta.request_id
-    : undefined
-  const suffix = requestId ? ` request_id=${requestId}` : ''
-  return new DtkApiError(`${stage}: ${code ? `${code} ` : ''}${message}${suffix}`, code, requestId)
-}
-
-function isParsedData(value: unknown): value is ParsedData {
-  return isRecord(value) && (isRecord(value.media) || typeof value.kind === 'string')
-}
-
-function isParseTask(value: unknown): value is ParseTask {
-  return isRecord(value) && typeof value.task_id === 'string' && value.task_id.length > 0
-}
-
-function sleep(ms: number) {
-  return new Promise<void>(resolve => setTimeout(resolve, ms))
+function firstUrl(value: unknown): string | undefined {
+  return collectUrls(value, 1).values().next().value
 }
 
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger(name)
-  const baseUrl = config.apiHost.replace(/\/+$/, '')
-
-  if (!baseUrl) logger.warn('未配置 dtk API 地址，抖音链接解析将无法使用')
+  const api = new DouyinApi(ctx, config)
+  if (!api.baseUrl) logger.warn('未配置 dtk API 地址，抖音链接解析将无法使用')
   if (!config.apiKey) logger.warn('未配置 dtk API Key，抖音链接解析将无法通过认证')
 
-  function apiUrl(path: string) {
-    return baseUrl + path
-  }
-
-  function httpOptions(timeout: number) {
-    return {
-      headers: {
-        Accept: 'application/json',
-        ...(config.apiKey ? { 'X-API-Key': config.apiKey } : {}),
-      },
-      timeout,
-    }
-  }
-
-  async function waitForTask(taskId: string): Promise<ParsedData> {
-    const deadline = Date.now() + config.pollTimeout * 1000
-    let lastState = ''
-
-    while (Date.now() < deadline) {
-      const response = await ctx.http.get<DtkResponse<ParseTask>>(
-        apiUrl(`/api/v1/tasks/${encodeURIComponent(taskId)}?lang=zh`),
-        httpOptions(15_000),
-      )
-      if (!response || !response.success) {
-        throw response ? responseError('查询解析任务失败', response) : new Error('查询解析任务没有返回响应')
-      }
-
-      const task = response.data
-      if (!isParseTask(task)) throw new Error('任务响应缺少 task_id')
-
-      const state = String(task.state || task.status || '').toLowerCase()
-      if (state !== lastState) {
-        logger.info(`解析任务 ${taskId} 状态：${state || 'unknown'}`)
-        lastState = state
-      }
-
-      if (state === 'done' || state === 'success' || state === 'succeeded') {
-        if (isParsedData(task.data)) return task.data
-        throw new Error(`解析任务 ${taskId} 已完成，但没有返回内容`)
-      }
-      if (state === 'failed' || state === 'error' || state === 'cancelled' || state === 'canceled') {
-        const detail = isRecord(task.error) && typeof task.error.message === 'string'
-          ? task.error.message
-          : `任务状态为 ${state}`
-        throw new DtkApiError(`解析任务失败：${detail}`, task.error?.code)
-      }
-
-      const remaining = deadline - Date.now()
-      if (remaining <= 0) break
-      await sleep(Math.min(config.pollInterval * 1000, remaining))
-    }
-
-    throw new Error(`解析任务超过 ${config.pollTimeout} 秒仍未完成`)
-  }
-
-  async function parseContent(input: string): Promise<ParsedData> {
-    if (!baseUrl) throw new Error('未配置 dtk API 地址')
-    const wait = Math.max(0, Math.min(30, config.waitSeconds))
-    const response = await ctx.http.post<DtkResponse<ParsedData | ParseTask>>(
-      `${apiUrl('/api/v1/parse')}?wait=${wait}&lang=zh`,
-      { url: input, include_raw: false },
-      httpOptions(Math.max(15_000, (wait + 10) * 1000)),
-    )
-
-    if (!response || !response.success) {
-      throw response ? responseError('提交解析任务失败', response) : new Error('解析接口没有返回响应')
-    }
-    if (isParsedData(response.data)) return response.data
-    if (isParseTask(response.data)) return waitForTask(response.data.task_id)
-    throw new Error('解析接口返回了无法识别的 data')
-  }
-
-  async function downloadVideo(url: string) {
-    const video = await ctx.http.get<ArrayBuffer>(url, {
-      headers: {
-        Accept: 'video/mp4,video/*;q=0.9,*/*;q=0.1',
-        Referer: 'https://www.douyin.com/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
-      },
-      responseType: 'arraybuffer',
-      timeout: config.downloadTimeout * 1000,
-    })
-    if (!video || video.byteLength === 0) throw new Error('视频下载结果为空')
-    return video
-  }
-
   ctx.middleware(async (session, next) => {
-    const content = session.content || ''
-    if (!content.toLowerCase().includes('douyin.com')) return next()
-
-    const url = extractDouyinUrl(content)
+    const url = extractDouyinUrl(session.content || '')
     if (!url) return next()
 
     try {
-      const data = await parseContent(url)
+      const data = await api.parse(url)
+      if (data.platform && data.platform !== 'douyin') throw new Error('接口返回的内容不属于抖音')
       const media = isRecord(data.media) ? data.media : {}
-      const imageUrls = collectUrls(media.images)
-      const videoUrl = firstUrl(media.video)
-      const coverUrl = firstUrl(media.covers)
-      const durationMs = Number(data.duration_ms)
-      const duration = Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : undefined
+      const imageUrls = Array.isArray(media.images)
+        ? [...new Set(media.images.map(firstUrl).filter((value): value is string => !!value))].slice(0, 30)
+        : [...collectUrls(media.images)]
       const title = data.description || data.title || '未提供描述'
       const parts: (string | h)[] = [`抖音解析：\n${title}`]
 
-      if (imageUrls.length > 0) {
+      if (imageUrls.length) {
         for (const imageUrl of imageUrls) parts.push(h('img', { src: imageUrl }))
-      } else if (duration !== undefined && duration > config.maxDuration * 1000) {
-        parts.push('视频过长~ 请打开抖音客户端查看')
-        if (coverUrl) parts.push(h('img', { src: coverUrl }))
-      } else if (videoUrl) {
-        const video = await downloadVideo(videoUrl)
-        parts.push(h.video(video, 'video/mp4'))
-      } else if (coverUrl) {
-        parts.push('接口未返回可用视频，以下发送封面预览')
-        parts.push(h('img', { src: coverUrl }))
       } else {
-        throw new Error(`接口未返回可用媒体，kind=${data.kind || 'unknown'}`)
+        const cover = firstUrl(media.covers)
+        const videoUrls = [...collectUrls([media.video, media.streams])]
+        const rawDuration = data.duration_ms
+        const duration = typeof rawDuration === 'number' || typeof rawDuration === 'string' ? Number(rawDuration) : NaN
+        let preview: string | undefined
+        if (!videoUrls.length) {
+          if (!cover) throw new Error('接口未返回可用媒体')
+          preview = '接口未返回可用视频，以下发送封面预览'
+        } else if (config.maxDuration === 0) {
+          preview = '当前仅发送视频预览'
+        } else if (!Number.isFinite(duration) || duration <= 0) {
+          preview = '无法确认视频时长~ 请打开抖音客户端查看'
+        } else if (duration > config.maxDuration * 1000) {
+          preview = '视频过长~ 请打开抖音客户端查看'
+        } else {
+          const video = await api.download(videoUrls)
+          parts.push(h.video(video, 'video/mp4'))
+        }
+        if (preview) {
+          parts.push(preview)
+          if (cover) parts.push(h('img', { src: cover }))
+        }
       }
 
+      if (api.disposed) return
       if (config.forward && session.platform === 'onebot') {
         await session.send(h('message', {
           forward: true,
@@ -317,7 +140,8 @@ export function apply(ctx: Context, config: Config) {
         for (const part of parts) await session.send(part)
       }
     } catch (error) {
-      logger.error(`处理抖音链接失败（${url}）：${formatError(error)}`)
+      if (api.disposed) return
+      logger.error('处理抖音链接失败：%s', describeError(error, config.apiKey))
       return '抖音解析失败，请稍后重试'
     }
   })
