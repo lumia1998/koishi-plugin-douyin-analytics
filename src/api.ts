@@ -2,7 +2,7 @@ import type { Context } from 'koishi'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Config } from './index'
 
-type ApiConfig = Pick<Config, 'apiHost' | 'apiKey' | 'waitSeconds' | 'pollInterval' | 'pollTimeout' | 'downloadTimeout'>
+type ApiConfig = Pick<Config, 'apiHost' | 'apiVersion' | 'apiKey' | 'waitSeconds' | 'pollInterval' | 'pollTimeout' | 'downloadTimeout'>
 type ApiResult = Record<string, unknown>
 
 interface ApiResponse {
@@ -92,9 +92,11 @@ export class DouyinApi {
   private readonly logger
   private rateResumeAt = 0
   readonly baseUrl: string
+  readonly version: 'v4' | 'v5'
 
   constructor(private readonly ctx: Context, private readonly config: ApiConfig) {
     this.baseUrl = config.apiHost.trim().replace(/\/+$/, '')
+    this.version = config.apiVersion ?? 'v5'
     this.logger = ctx.logger('douyin-analytics')
     ctx.on('dispose', () => this.controller.abort())
   }
@@ -103,8 +105,39 @@ export class DouyinApi {
     return this.controller.signal.aborted
   }
 
-  async parse(url: string) {
+  async parse(url: string): Promise<ApiResult> {
     if (!this.baseUrl) throw new Error('未配置 dtk API 地址')
+    return this.version === 'v4' ? this.parseV4(url) : this.parseV5(url)
+  }
+
+  private async parseV4(url: string): Promise<ApiResult> {
+    const encodedUrl = encodeURIComponent(url)
+    const response = await this.withRequestSignal(signal => this.ctx.http.get<unknown>(
+      `${this.baseUrl}/api/hybrid/video_data?url=${encodedUrl}&minimal=true`,
+      { signal, timeout: 15_000, responseType: 'json' },
+    ))
+    if (!isRecord(response) || response.code !== 200 || !isRecord(response.data)) {
+      throw new Error('dtk V4 解析失败，检查服务地址或作品链接')
+    }
+
+    const data = response.data
+    const imageData = isRecord(data.image_data) ? data.image_data : {}
+    const isAlbum = data.type === 'image' || Object.keys(imageData).length > 0
+    const coverData = isRecord(data.cover_data) ? data.cover_data : {}
+    const duration = isRecord(data.music) ? nonNegativeNumber(data.music.duration) : undefined
+    return {
+      platform: data.platform,
+      description: data.desc,
+      duration_ms: duration === undefined ? undefined : duration * 1000,
+      media: {
+        images: imageData.no_watermark_image_list,
+        covers: [coverData.dynamic_cover, coverData.origin_cover, coverData.cover],
+        video: isAlbum ? undefined : `${this.baseUrl}/api/download?url=${encodedUrl}&prefix=true&with_watermark=true`,
+      },
+    }
+  }
+
+  private async parseV5(url: string): Promise<ApiResult> {
     const wait = Math.max(0, Math.min(30, this.config.waitSeconds))
     const timeout = Math.max(15_000, (wait + 10) * 1000)
     let response = await this.submit(url, wait, Date.now() + timeout, timeout)

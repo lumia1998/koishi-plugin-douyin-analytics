@@ -6,14 +6,15 @@ export const name = 'douyin-analytics'
 export const usage = `
 ## 解析群聊中的抖音链接
 
-发送包含抖音链接的消息即可触发解析。插件使用 dtk 的 "/api/v1/parse" 接口，
-支持异步任务轮询、视频和图集，并在下载媒体后发送。
+发送包含抖音链接的消息即可触发解析。插件默认使用 dtk V5，支持异步任务轮询、视频和图集。
+连接旧版 dtk 服务时，将 API 版本设为 V4。
 
 需要部署后端 [Douyin TikTok Download API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)。
 `
 
 export interface Config {
   apiHost: string
+  apiVersion?: 'v4' | 'v5'
   apiKey: string
   maxDuration: number
   forward: boolean
@@ -25,12 +26,13 @@ export interface Config {
 
 export const Config = Schema.object({
   apiHost: Schema.string().default('').description('dtk API 地址，请先部署后端服务'),
-  apiKey: Schema.string().role('secret').default('').description('dtk API Key，不要写入源码'),
-  maxDuration: Schema.number().min(0).default(90).description('视频时长上限（秒），超出、时长未知或设为 0 时仅发送预览'),
+  apiVersion: Schema.union(['v4', 'v5']).default('v5').description('与 dtk 后端匹配的 API 版本，默认 V5'),
+  apiKey: Schema.string().role('secret').default('').description('V5 API Key，V4 可留空'),
+  maxDuration: Schema.number().min(0).default(90).description('视频时长上限（秒），超限、设为 0 或 V5 时长未知时仅发送预览'),
   forward: Schema.boolean().default(false).description('以合并消息发送解析内容（仅支持 OneBot 适配器）'),
-  waitSeconds: Schema.number().min(0).max(30).default(20).description('首次请求等待时间（秒），dtk 最大为 30 秒'),
-  pollInterval: Schema.number().min(0.2).max(10).default(1).description('异步任务轮询初始间隔（秒）'),
-  pollTimeout: Schema.number().min(5).max(600).default(180).description('异步任务最多等待时间（秒）'),
+  waitSeconds: Schema.number().min(0).max(30).default(20).description('V5 首次请求等待时间（秒），dtk 最大为 30 秒'),
+  pollInterval: Schema.number().min(0.2).max(10).default(1).description('V5 异步任务轮询初始间隔（秒）'),
+  pollTimeout: Schema.number().min(5).max(600).default(180).description('V5 异步任务最多等待时间（秒）'),
   downloadTimeout: Schema.number().min(10).max(600).default(180).description('视频下载及备用地址的总超时时间（秒）'),
 })
 
@@ -100,7 +102,7 @@ export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger(name)
   const api = new DouyinApi(ctx, config)
   if (!api.baseUrl) logger.warn('未配置 dtk API 地址，抖音链接解析将无法使用')
-  if (!config.apiKey) logger.warn('未配置 dtk API Key，抖音链接解析将无法通过认证')
+  if (api.version === 'v5' && !config.apiKey) logger.warn('未配置 dtk API Key，抖音链接解析将无法通过认证')
 
   ctx.middleware(async (session, next) => {
     const url = extractDouyinUrl(session.content || '')
@@ -127,7 +129,7 @@ export function apply(ctx: Context, config: Config) {
           preview = '接口未返回可用视频，以下发送封面预览'
         } else if (config.maxDuration === 0) {
           preview = '当前仅发送视频预览'
-        } else if (!Number.isFinite(duration) || duration <= 0) {
+        } else if (api.version === 'v5' && (!Number.isFinite(duration) || duration <= 0)) {
           preview = '无法确认视频时长~ 请打开抖音客户端查看'
         } else if (duration > config.maxDuration * 1000) {
           preview = '视频过长~ 请打开抖音客户端查看'
