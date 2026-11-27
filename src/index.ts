@@ -80,6 +80,22 @@ function firstUrl(value: unknown): string | undefined {
   return collectUrls(value, 1).values().next().value
 }
 
+function albumImageUrls(images: unknown) {
+  const selected = new Map<string, string>()
+  for (const image of Array.isArray(images) ? images : [images]) {
+    const value = firstUrl(image)
+    if (!value) continue
+    const url = new URL(value)
+    // CDN mirrors can share a storage object while using different hosts, signatures and formats.
+    const object = /(?:^|\.)(?:douyinpic\.com|byteimg\.com|ibyteimg\.com|pstatp\.com)$/.test(url.hostname)
+      && /^\/(tos-[\w-]+\/[\w-]+)(?:~tplv-[^/]+|\.(?:jpeg|jpg|png|webp|heic|gif))?$/i.exec(url.pathname)?.[1]
+    const key = object ? `tos:${object}` : value
+    if (!selected.has(key)) selected.set(key, value)
+    if (selected.size >= 30) break
+  }
+  return [...selected.values()]
+}
+
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger(name)
   const api = new DouyinApi(ctx, config)
@@ -94,9 +110,7 @@ export function apply(ctx: Context, config: Config) {
       const data = await api.parse(url)
       if (data.platform && data.platform !== 'douyin') throw new Error('接口返回的内容不属于抖音')
       const media = isRecord(data.media) ? data.media : {}
-      const imageUrls = Array.isArray(media.images)
-        ? [...new Set(media.images.map(firstUrl).filter((value): value is string => !!value))].slice(0, 30)
-        : [...collectUrls(media.images)]
+      const imageUrls = albumImageUrls(media.images)
       const title = data.description || data.title || '未提供描述'
       const parts: (string | h)[] = [`抖音解析：\n${title}`]
 
